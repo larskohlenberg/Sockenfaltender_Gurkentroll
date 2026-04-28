@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0b0d12">
+<title>Sockenfaltender Gurkentroll</title>
+<style>
+  :root{
+    --slot-h: clamp(2.6rem, 11vw, 5rem);
+    --slot-fs: clamp(1.5rem, 7.2vw, 3.4rem);
+    --bg: #0b0d12;
+    --fg: #eaeefb;
+    --accent: rgba(140,200,255,.85);
+  }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; padding:0; height:100%; overflow:hidden; }
+  body{
+    background:
+      radial-gradient(ellipse at 50% 20%, #1c2438 0%, transparent 60%),
+      radial-gradient(ellipse at 50% 110%, #1a1230 0%, transparent 55%),
+      var(--bg);
+    color:var(--fg);
+    font-family:-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    font-weight:600;
+    display:flex; flex-direction:column; align-items:center;
+    user-select:none;
+    -webkit-user-select:none;
+    -webkit-tap-highlight-color:transparent;
+    -webkit-touch-callout:none;
+    padding:
+      max(env(safe-area-inset-top), 1rem)
+      env(safe-area-inset-right)
+      max(env(safe-area-inset-bottom), 1.5rem)
+      env(safe-area-inset-left);
+    overscroll-behavior:none;
+    touch-action:manipulation;
+  }
+  #stage{
+    flex:1;
+    display:flex; align-items:center; justify-content:center;
+    width:100%;
+    padding:0.5rem;
+    min-height:0;
+  }
+  #slots{
+    display:flex; flex-wrap:wrap;
+    gap:0.05em 0.4em;
+    align-items:center; justify-content:center;
+    font-size:var(--slot-fs);
+    line-height:1;
+    max-width:96vw;
+    text-align:center;
+  }
+  .slot{
+    height:var(--slot-h);
+    overflow:hidden;
+    position:relative;
+    display:inline-flex;
+    justify-content:center;   /* zentriert breitere Strips symmetrisch */
+    align-items:flex-start;   /* Strip am Slot-Top – translateY tut den Rest */
+    vertical-align:middle;
+    isolation:isolate;
+  }
+  .strip{
+    display:flex;
+    flex-direction:column;
+    align-items:center;       /* jede Zeile horizontal zentriert */
+    will-change:transform;
+    transform:translateY(0);
+  }
+  .row,
+  .word{
+    height:var(--slot-h);
+    display:flex; align-items:center; justify-content:center;
+    white-space:nowrap;
+    padding:0 0.04em;
+  }
+  .slot.fixed{ opacity:1; transition:opacity 220ms ease; }
+  .slot.fixed.pending{ opacity:0; }
+
+  /* Edge fade während des Spinnens – maskiert Kandidaten ober-/unterhalb dezent */
+  .slot::before, .slot::after{
+    content:"";
+    position:absolute; left:0; right:0; height:32%;
+    pointer-events:none; z-index:1;
+    transition: opacity 220ms ease;
+  }
+  .slot::before{ top:0;    background:linear-gradient(to bottom, rgba(11,13,18,.85), rgba(11,13,18,0)); }
+  .slot::after { bottom:0; background:linear-gradient(to top,    rgba(11,13,18,.85), rgba(11,13,18,0)); }
+  /* Im statischen Zustand (initial / locked) soll das finale Wort frei strahlen */
+  .slot.fixed::before, .slot.fixed::after { opacity:0; }
+  /* overflow:hidden würde den Glow-Schatten abschneiden – nur im Spin nötig */
+  .slot.fixed { overflow:visible; }
+
+  /* Glow on locked state, applied to whatever is currently visible (final row / static word) */
+  #slots.locked .strip > .row:last-child,
+  #slots.locked .word{
+    color:#f7faff;
+    animation: glowPulse 2.6s ease-in-out infinite;
+  }
+  @keyframes glowPulse{
+    0%,100%{ text-shadow: 0 0 10px rgba(140,200,255,.45), 0 0 30px rgba(140,200,255,.22); }
+    50%    { text-shadow: 0 0 18px rgba(180,220,255,.85), 0 0 50px rgba(140,200,255,.55); }
+  }
+
+  #tap{
+    appearance:none; -webkit-appearance:none;
+    background:linear-gradient(180deg, #2a3550, #161e34);
+    border:1px solid rgba(140,200,255,.28);
+    color:var(--fg);
+    font-family:inherit;
+    font-size:1rem;
+    font-weight:700;
+    letter-spacing:.18em;
+    text-transform:uppercase;
+    padding:1.05rem 3.2rem;
+    border-radius:999px;
+    cursor:pointer;
+    min-width:200px;
+    min-height:64px;
+    box-shadow:
+      0 10px 28px rgba(0,0,0,.5),
+      0 0 0 0 rgba(140,200,255,.0),
+      inset 0 1px 0 rgba(255,255,255,.08);
+    transition:transform 90ms ease, box-shadow 240ms ease, opacity 200ms ease;
+    margin-bottom:0.4rem;
+  }
+  #tap:active{ transform:scale(0.97); }
+  #tap.busy{ opacity:.55; pointer-events:none; }
+  #tap:hover{ box-shadow: 0 10px 28px rgba(0,0,0,.5), 0 0 18px rgba(140,200,255,.18), inset 0 1px 0 rgba(255,255,255,.08); }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <div id="slots" aria-live="polite"></div>
+  </div>
+  <button id="tap" type="button" aria-label="Neue Wortkombination generieren">Tap</button>
+
+<script>
+(() => {
+  'use strict';
+
+  // ---------- Wortlisten ----------
+  // Verben als Partizipien (so umgehen wir -eln/-ern Elision sauber)
+  const verbParticiples = [
+    'faltend','kauend','knabbernd','jonglierend','brütend','tanzend','glotzend',
+    'grummelnd','wackelnd','schwitzend','kichernd','nuschelnd','polierend',
+    'bügelnd','kratzend','pustend','schmatzend','schnurrend','lauschend',
+    'flüsternd','stampfend','schlurfend','piepsend','schnüffelnd','jaulend',
+    'klimpernd','fuchtelnd','summend','räuspernd','trommelnd','kullernd',
+    'schleckend','krabbelnd','hopsend','wuselnd'
+  ];
+
+  // Objekt-Stämme zur Komposition mit Partizipien (kleingeschrieben, sind interner Bestandteil eines Adjektivs)
+  const objectStems = [
+    'socken','gurken','käse','wurst','pudding','brezel','quark','schnitzel',
+    'nudel','pommes','senf','tofu','kürbis','apfel','radieschen','zwiebel',
+    'kakao','zucker','bonbon','keks','kuchen','toast','butter',
+    'krapfen','marzipan','lakritz','marmelade','honig','salami','spinat'
+  ];
+
+  // Präfixe für Substantiv-Komposita (Großbuchstabe, da sie das Substantiv anführen)
+  const prefixStems = [
+    'Gurken','Käse','Wurst','Pudding','Wackel','Stink','Knatter','Quark',
+    'Mond','Schnitzel','Brezel','Senf','Tofu','Schluck','Knirps',
+    'Pommes','Schnaps','Krümel','Tomaten','Plumps','Quassel','Wabbel',
+    'Schmoll','Klops','Brumm','Zappel','Murmel','Krabbel','Knatsch','Pups'
+  ];
+
+  // Maskuline Grundsubstantive im Singular: NUR starke Maskulina, deren Dativ Sg.
+  // identisch zum Nominativ Sg. ist (keine n-Deklination, kein -en-Anhängsel).
+  // Schwache Maskulina (Fürst→Fürsten, Bursche→Burschen, …) bewusst ausgeschlossen.
+  const baseNouns = [
+    'Troll','Kobold','Wicht','Lord','Hexer','Hampel',
+    'Zwerg','Strolch','Bengel','Lümmel','Magier','Kavalier',
+    'Kasper','Schlawiner','Wüterich','Räuber','Wanderer',
+    'Schlingel','Tölpel','Esel','Schreihals','Klopfer','Gauner',
+    'Schwätzer','Stänkerer','Schussel','Rumtreiber','Tunichtgut',
+    'Tagedieb','Quälgeist'
+  ];
+
+  // Einfache Adjektivstämme (alle so geformt, dass +er/+em korrekt ist; keine -el/-er-Elision)
+  const simpleAdjStems = [
+    'klebrig','wackelig','finster','glitzernd','feucht','muffig','quietschend',
+    'pelzig','staubig','schräg','knusprig','samtig','schrullig','rußig',
+    'stachlig','dösig','bockig','grantig','verträumt','mürrisch','frech',
+    'haarig','löchrig','knorpelig','speckig','stoppelig','piefig','doof',
+    'schief','mickrig','flauschig','knubbelig'
+  ];
+
+  // Unflektierte Adverbien (modifizieren ein Adjektiv)
+  const adverbs = [
+    'leicht','sehr','peinlich','mysteriös','dauernd','manchmal','frech',
+    'seltsam','gefährlich','kichernd','bedrohlich','genüsslich','still',
+    'eilig','hinterhältig','heimlich','plötzlich','würdevoll','tollpatschig',
+    'zaghaft','arglos','strahlend','leise','hektisch','vornehm'
+  ];
+
+  // Einwort-Präposition+Artikel im Dativ Mask. Sg. (Kontraktionen)
+  const prepDatSingle = ['im','am','vorm','hinterm','unterm','überm','beim'];
+
+  // ---------- Zufall ----------
+  function rand(n){
+    const buf = new Uint32Array(1);
+    crypto.getRandomValues(buf);
+    return buf[0] % n;
+  }
+  const pick = (arr) => arr[rand(arr.length)];
+  const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+
+  // ---------- Grammatik-Generatoren ----------
+  const adjEnd = (kasus) => kasus === 'dat' ? 'em' : 'er';
+
+  const makeSimpleAdj         = (kasus) => pick(simpleAdjStems) + adjEnd(kasus);
+  const makeSimpleParticiple  = (kasus) => pick(verbParticiples) + adjEnd(kasus);
+  const makeCompoundParticiple = (kasus) => pick(objectStems) + pick(verbParticiples) + adjEnd(kasus);
+  const makeAdverb            = () => pick(adverbs);
+  const makeNoun              = () => pick(prefixStems) + pick(baseNouns).toLowerCase();
+
+  function genKind(kind, kasus){
+    switch(kind){
+      case 'adj':                return makeSimpleAdj(kasus);
+      case 'adv':                return makeAdverb();
+      case 'participleSimple':   return makeSimpleParticiple(kasus);
+      case 'participleCompound': return makeCompoundParticiple(kasus);
+      case 'noun':               return makeNoun();
+    }
+    return '';
+  }
+  // Großschreibung: Substantive immer; alle anderen nur wenn an Position 0.
+  function format(kind, raw, isFirst){
+    if (kind === 'noun') return cap(raw);
+    return isFirst ? cap(raw) : raw;
+  }
+
+  // ---------- Pattern-Pool ----------
+  // Jedes Pattern liefert Slot-Specs: {kind, kasus?, text? (für 'fixed')}
+  const PATTERNS = [
+    // 2 Wörter
+    () => [
+      { kind:'participleCompound', kasus:'nom' },
+      { kind:'noun' },
+    ],
+    // 3 Wörter — Adverb + simples Partizip + Substantiv
+    () => [
+      { kind:'adv' },
+      { kind:'participleSimple', kasus:'nom' },
+      { kind:'noun' },
+    ],
+    // 3 Wörter — Adjektiv + Adjektiv + Substantiv
+    () => [
+      { kind:'adj', kasus:'nom' },
+      { kind:'adj', kasus:'nom' },
+      { kind:'noun' },
+    ],
+    // 3 Wörter — Compound-Partizip + Adjektiv + Substantiv
+    () => [
+      { kind:'participleCompound', kasus:'nom' },
+      { kind:'adj', kasus:'nom' },
+      { kind:'noun' },
+    ],
+    // 4 Wörter — Adj/Compound-Partizip + Subst + Präp + Subst
+    () => [
+      { kind: rand(2) ? 'adj' : 'participleCompound', kasus:'nom' },
+      { kind:'noun' },
+      { kind:'fixed', text: pick(prepDatSingle) },
+      { kind:'noun' },
+    ],
+    // 5 Wörter — Adj + Subst + 'mit' + AdjDat + Subst
+    () => [
+      { kind: rand(2) ? 'adj' : 'participleCompound', kasus:'nom' },
+      { kind:'noun' },
+      { kind:'fixed', text:'mit' },
+      { kind: rand(2) ? 'adj' : 'participleCompound', kasus:'dat' },
+      { kind:'noun' },
+    ],
+  ];
+
+  // ---------- Generierung ----------
+  let lastOutput = 'Sockenfaltender Gurkentroll';
+
+  function generate(){
+    let result, text;
+    let tries = 0;
+    do{
+      const slotSpecs = pick(PATTERNS)();
+      result = slotSpecs.map((s, i) => {
+        if (s.kind === 'fixed') {
+          return { kind:'fixed', finalText: s.text, isFirst: i === 0 };
+        }
+        const raw = genKind(s.kind, s.kasus);
+        return {
+          kind: s.kind,
+          kasus: s.kasus,
+          finalText: format(s.kind, raw, i === 0),
+          isFirst: i === 0,
+        };
+      });
+      text = result.map(r => r.finalText).join(' ');
+      tries++;
+    } while (text === lastOutput && tries < 4);
+    lastOutput = text;
+    return result;
+  }
+
+  // ---------- Slot-DOM-Bau ----------
+  const SPIN_ROWS = 60;
+  const slotsEl = document.getElementById('slots');
+  const tapBtn  = document.getElementById('tap');
+
+  function buildSlot(slotSpec){
+    const slotEl = document.createElement('div');
+    slotEl.className = 'slot';
+
+    if (slotSpec.kind === 'fixed') {
+      slotEl.classList.add('fixed','pending');
+      const w = document.createElement('div');
+      w.className = 'word';
+      w.textContent = slotSpec.finalText;
+      slotEl.appendChild(w);
+      return {
+        el: slotEl,
+        animate: (durationMs) => {
+          // Sanftes Einblenden kurz vor "Stopp"
+          const showAt = Math.max(0, durationMs - 220);
+          setTimeout(() => slotEl.classList.remove('pending'), showAt);
+        }
+      };
+    }
+
+    const strip = document.createElement('div');
+    strip.className = 'strip';
+
+    // SPIN_ROWS Zufalls-Kandidaten + finale Zeile am Ende
+    for (let i = 0; i < SPIN_ROWS; i++){
+      const row = document.createElement('div');
+      row.className = 'row';
+      const raw = genKind(slotSpec.kind, slotSpec.kasus);
+      row.textContent = format(slotSpec.kind, raw, slotSpec.isFirst);
+      strip.appendChild(row);
+    }
+    const finalRow = document.createElement('div');
+    finalRow.className = 'row final';
+    finalRow.textContent = slotSpec.finalText;
+    strip.appendChild(finalRow);
+
+    slotEl.appendChild(strip);
+
+    return {
+      el: slotEl,
+      animate: (durationMs) => {
+        // Subpixel-genaue Zeilenhöhe — clientHeight rundet auf Integer und
+        // führt über 60 Zeilen zu Drift, sodass die finale Zeile knapp aus
+        // dem Slot-Fenster rutscht.
+        const rowH = strip.firstElementChild.getBoundingClientRect().height;
+        const targetY = -(SPIN_ROWS) * rowH;
+        // Reset (defensiv) und dann transition + transform in nächsten Frame
+        strip.style.transition = 'none';
+        strip.style.transform  = 'translateY(0)';
+        // Reflow erzwingen
+        void strip.offsetHeight;
+        strip.style.transition = `transform ${durationMs}ms cubic-bezier(0.05, 0.6, 0.18, 1)`;
+        requestAnimationFrame(() => {
+          strip.style.transform = `translateY(${targetY}px)`;
+        });
+      }
+    };
+  }
+
+  // ---------- Initialer Zustand ----------
+  function showInitial(){
+    slotsEl.classList.remove('locked');
+    slotsEl.innerHTML = '';
+    const initial = ['Sockenfaltender','Gurkentroll'];
+    initial.forEach(text => {
+      const slotEl = document.createElement('div');
+      slotEl.className = 'slot fixed';
+      const w = document.createElement('div');
+      w.className = 'word';
+      w.textContent = text;
+      slotEl.appendChild(w);
+      slotsEl.appendChild(slotEl);
+    });
+    requestAnimationFrame(() => slotsEl.classList.add('locked'));
+    lastOutput = initial.join(' ');
+  }
+
+  // ---------- Slot-Machine-Lauf ----------
+  let isAnimating = false;
+
+  function runSlotMachine(){
+    isAnimating = true;
+    tapBtn.classList.add('busy');
+    slotsEl.classList.remove('locked');
+    slotsEl.innerHTML = '';
+
+    const result = generate();
+    const animators = result.map(buildSlot);
+    animators.forEach(a => slotsEl.appendChild(a.el));
+
+    // Layout erzwingen, bevor Animationen starten (für korrektes clientHeight)
+    void slotsEl.offsetHeight;
+
+    // Slot-Breite an die finale Zeile koppeln – damit sich das Wrap-Layout
+    // beim Lock (Strip → .word) nicht verändert. Während des Spins werden
+    // breitere Kandidaten durch overflow:hidden symmetrisch beschnitten.
+    slotsEl.querySelectorAll('.slot').forEach(s => {
+      if (s.classList.contains('fixed')) return;
+      const finalRow = s.querySelector('.row.final');
+      if (!finalRow) return;
+      const w = finalRow.getBoundingClientRect().width;
+      s.style.flex = '0 0 auto';
+      s.style.width = w + 'px';
+    });
+
+    const baseDuration = 1100;
+    const stagger = 300;
+    let maxDuration = 0;
+    animators.forEach((a, i) => {
+      const dur = baseDuration + i * stagger;
+      maxDuration = Math.max(maxDuration, dur);
+      a.animate(dur);
+    });
+
+    setTimeout(() => {
+      // Spin-Strips durch statisches .word ersetzen, damit der Glow nicht vom
+      // overflow:hidden des Slots abgeschnitten wird.
+      slotsEl.querySelectorAll('.slot').forEach(s => {
+        if (s.classList.contains('fixed')) return;
+        const finalRow = s.querySelector('.row:last-child');
+        if (!finalRow) return;
+        const w = document.createElement('div');
+        w.className = 'word';
+        w.textContent = finalRow.textContent;
+        s.innerHTML = '';
+        s.appendChild(w);
+        s.classList.add('fixed');
+      });
+      slotsEl.classList.add('locked');
+      tapBtn.classList.remove('busy');
+      isAnimating = false;
+    }, maxDuration + 80);
+  }
+
+  // ---------- Eingaben ----------
+  function onTap(e){
+    if (e) e.preventDefault();
+    if (isAnimating) return;
+    if (navigator.vibrate) {
+      try { navigator.vibrate(15); } catch(_){}
+    }
+    runSlotMachine();
+  }
+  tapBtn.addEventListener('click', onTap);
+  // Leertaste / Enter als Tastatur-Trigger (Desktop)
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space' || e.code === 'Enter') onTap(e);
+  });
+
+  // ---------- Start ----------
+  showInitial();
+})();
+</script>
+</body>
+</html>
